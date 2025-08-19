@@ -184,6 +184,69 @@
   )
 )
 
+;; Advanced batch ticket purchase system with discount tiers and group bookings
+(define-public (batch-purchase-tickets 
+  (event-id uint) 
+  (quantity uint) 
+  (seat-infos (list 10 (string-ascii 50)))
+  (apply-group-discount bool)
+)
+  (let (
+    (event-data (unwrap! (map-get? events { event-id: event-id }) err-not-found))
+    (base-price (calculate-ticket-price event-id))
+    ;; Apply tiered discounts: 5+ tickets = 10%, 10+ tickets = 15%
+    (discount-rate (if apply-group-discount
+                     (if (>= quantity u10) u15
+                         (if (>= quantity u5) u10 u0))
+                     u0))
+    (discounted-price (- base-price (/ (* base-price discount-rate) u100)))
+    (total-ticket-cost (* discounted-price quantity))
+    (platform-fee (calculate-platform-fee total-ticket-cost))
+    (total-cost (+ total-ticket-cost platform-fee))
+    (available-tickets (get available-tickets event-data))
+  )
+    ;; Comprehensive validation
+    (asserts! (is-event-valid event-id) err-event-not-active)
+    (asserts! (>= available-tickets quantity) err-sold-out)
+    (asserts! (<= quantity u10) err-invalid-price) ;; Max 10 tickets per batch
+    (asserts! (>= (stx-get-balance tx-sender) total-cost) err-insufficient-payment)
+    (asserts! (is-eq (len seat-infos) quantity) err-invalid-price)
+    
+    ;; Process payment
+    (try! (stx-transfer? total-cost tx-sender contract-owner))
+    
+    ;; Create tickets in batch with unique seat assignments
+    (let ((ticket-creation-result 
+      (fold create-batch-ticket seat-infos 
+        { 
+          event-id: event-id, 
+          price-paid: discounted-price,
+          current-ticket-id: (var-get next-ticket-id),
+          success: true
+        })))
+    
+    ;; Update event data
+    (map-set events
+      { event-id: event-id }
+      (merge event-data { 
+        available-tickets: (- available-tickets quantity)
+      })
+    )
+    
+    ;; Update global state
+    (var-set total-platform-revenue (+ (var-get total-platform-revenue) platform-fee))
+    (var-set next-ticket-id (+ (var-get next-ticket-id) quantity))
+    
+    (ok {
+      starting-ticket-id: (get current-ticket-id ticket-creation-result),
+      quantity: quantity,
+      total-paid: total-cost,
+      discount-applied: discount-rate
+    })
+    )
+  )
+)
+
 ;; Helper function for batch ticket creation
 (define-private (create-batch-ticket 
   (seat-info (string-ascii 50))
